@@ -1,0 +1,30 @@
+Port 2222
+AddressFamily any
+ListenAddress 0.0.0.0
+ListenAddress ::
+
+HostKey /run/tempvm/ssh_host_ed25519_key
+PidFile /run/tempvm/sshd.pid
+
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+AuthenticationMethods publickey
+AuthorizedKeysFile .ssh/authorized_keys
+AllowUsers ubuntu
+
+UsePAM no
+UseDNS no
+PrintMotd no
+PrintLastLog yes
+X11Forwarding no
+AllowAgentForwarding yes
+AllowTcpForwarding yes
+GatewayPorts no
+PermitTunnel no
+
+ClientAliveInterval 30
+ClientAliveCountMax 3
+Subsystem sftp internal-sftp
