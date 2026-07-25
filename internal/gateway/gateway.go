@@ -27,6 +27,7 @@ type Gateway struct {
 
 func New(config Config, backend Backend, hostKey ssh.Signer) *Gateway {
 	sshConfig := &ssh.ServerConfig{
+		NoClientAuth: true,
 		NoClientAuthCallback: func(meta ssh.ConnMetadata) (*ssh.Permissions, error) {
 			if meta.User() != "linux" {
 				return nil, fmt.Errorf("unsupported user %q; connect as linux", meta.User())
