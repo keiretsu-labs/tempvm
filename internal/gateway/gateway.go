@@ -151,7 +151,7 @@ func (g *Gateway) handleConnection(parent context.Context, raw net.Conn) {
 	}
 	defer backChannel.Close()
 
-	bridgeChannel(frontChannel, frontChannelRequests, backChannel, backChannelRequests)
+	channelDone := bridgeChannel(frontChannel, frontChannelRequests, backChannel, backChannelRequests)
 	go bridgeGlobalRequests(frontRequests, back)
 	go bridgeGlobalRequests(backRequests, front)
 	go bridgeNewChannels(frontChannels, back)
@@ -164,6 +164,7 @@ func (g *Gateway) handleConnection(parent context.Context, raw net.Conn) {
 
 	select {
 	case <-ctx.Done():
+	case <-channelDone:
 	case <-waitFront:
 	case <-waitBack:
 	}

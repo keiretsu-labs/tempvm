@@ -39,11 +39,16 @@ func bridgeChannel(
 	leftRequests <-chan *ssh.Request,
 	right ssh.Channel,
 	rightRequests <-chan *ssh.Request,
-) {
+) <-chan struct{} {
+	guestDone := make(chan struct{})
 	go bridgeChannelRequests(leftRequests, right)
 	go bridgeChannelRequests(rightRequests, left)
 	go copyAndCloseWrite(right, left)
-	go copyAndCloseWrite(left, right)
+	go func() {
+		copyAndCloseWrite(left, right)
+		close(guestDone)
+	}()
+	return guestDone
 }
 
 func bridgeChannelRequests(requests <-chan *ssh.Request, destination ssh.Channel) {
