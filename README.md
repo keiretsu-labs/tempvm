@@ -6,6 +6,8 @@
 ssh linux@tempvm
 ```
 
+Open `http://tempvm/` from the tailnet for the landing and status page.
+
 The SSH gateway creates a Kubernetes
 [`Sandbox`](https://github.com/kubernetes-sigs/agent-sandbox) using the
 configured `RuntimeClass`, waits for its Linux guest to become ready, and
