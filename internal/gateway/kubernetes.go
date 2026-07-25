@@ -296,6 +296,7 @@ func (b *KubernetesBackend) sandbox(name string, labels map[string]string) *unst
 			"ownerReferences": owner,
 		},
 		"spec": map[string]any{
+			"operatingMode":  "Running",
 			"shutdownPolicy": "Delete",
 			"podTemplate": map[string]any{
 				"metadata": map[string]any{"labels": stringMap(labels)},
