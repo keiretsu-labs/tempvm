@@ -29,6 +29,11 @@ jobs:
 
       - run: go vet ./...
 
+      - name: Validate Linux entrypoint
+        run: |
+          test -x images/linux/entrypoint.sh
+          bash -n images/linux/entrypoint.sh
+
   build:
     needs:
       - test
