@@ -1,6 +1,9 @@
 name: images
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
@@ -35,6 +38,7 @@ jobs:
           bash -n images/linux/entrypoint.sh
 
   build:
+    if: github.ref == 'refs/heads/main'
     needs:
       - test
     runs-on: ubuntu-latest

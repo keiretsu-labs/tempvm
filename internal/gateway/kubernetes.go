@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,10 +27,12 @@ import (
 )
 
 const (
-	managedLabel = "app.kubernetes.io/managed-by"
-	managedValue = "tempvm"
-	sessionLabel = "tempvm.keiretsu.top/session"
-	guestPort    = 2222
+	managedLabel       = "app.kubernetes.io/managed-by"
+	managedValue       = "tempvm"
+	sessionLabel       = "tempvm/session"
+	legacySessionLabel = "tempvm.keiretsu.top/session"
+	startedAtLabel     = "tempvm/started-at"
+	guestPort          = 2222
 )
 
 var sandboxResource = schema.GroupVersionResource{
@@ -101,12 +104,15 @@ func (b *KubernetesBackend) HostKey(ctx context.Context) (ssh.Signer, error) {
 }
 
 func (b *KubernetesBackend) RemoveOrphans(ctx context.Context) error {
-	selector := sessionLabel
+	selector := fmt.Sprintf("%s=%s", managedLabel, managedValue)
 	sandboxes, err := b.dynamic.Resource(sandboxResource).Namespace(b.config.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		return err
 	}
 	for _, sandbox := range sandboxes.Items {
+		if !hasSessionLabel(sandbox.GetLabels()) {
+			continue
+		}
 		if err := b.dynamic.Resource(sandboxResource).Namespace(b.config.Namespace).Delete(ctx, sandbox.GetName(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
@@ -117,6 +123,9 @@ func (b *KubernetesBackend) RemoveOrphans(ctx context.Context) error {
 		return err
 	}
 	for _, service := range services.Items {
+		if !hasSessionLabel(service.Labels) {
+			continue
+		}
 		if err := b.core.CoreV1().Services(b.config.Namespace).Delete(ctx, service.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
@@ -127,6 +136,9 @@ func (b *KubernetesBackend) RemoveOrphans(ctx context.Context) error {
 		return err
 	}
 	for _, secret := range secrets.Items {
+		if !hasSessionLabel(secret.Labels) {
+			continue
+		}
 		if err := b.core.CoreV1().Secrets(b.config.Namespace).Delete(ctx, secret.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
@@ -134,11 +146,25 @@ func (b *KubernetesBackend) RemoveOrphans(ctx context.Context) error {
 	return nil
 }
 
+func hasSessionLabel(labels map[string]string) bool {
+	return strings.TrimSpace(labels[sessionLabel]) != "" || strings.TrimSpace(labels[legacySessionLabel]) != ""
+}
+
 func (b *KubernetesBackend) Create(ctx context.Context, progress io.Writer) (*Session, error) {
-	name, err := randomName()
-	if err != nil {
-		return nil, err
+	metadata := sessionMetadataFrom(ctx)
+	name := metadata.Name
+	if name == "" {
+		var err error
+		name, err = randomName()
+		if err != nil {
+			return nil, err
+		}
 	}
+	startedAt := metadata.StartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
+	var err error
 	signer, _, authorizedKey, err := newSSHKey()
 	if err != nil {
 		return nil, err
@@ -148,10 +174,7 @@ func (b *KubernetesBackend) Create(ctx context.Context, progress io.Writer) (*Se
 		Address: fmt.Sprintf("%s.%s.svc:%d", name, b.config.Namespace, guestPort),
 		Signer:  signer,
 	}
-	labels := map[string]string{
-		managedLabel: managedValue,
-		sessionLabel: name,
-	}
+	labels := sessionLabels(name, startedAt)
 
 	immutable := true
 	if _, err := b.core.CoreV1().Secrets(b.config.Namespace).Create(ctx, &corev1.Secret{
@@ -187,7 +210,7 @@ func (b *KubernetesBackend) Create(ctx context.Context, progress io.Writer) (*Se
 		return nil, fmt.Errorf("create guest Service: %w", err)
 	}
 
-	sandbox := b.sandbox(name, labels)
+	sandbox := b.sandboxAt(name, labels, startedAt)
 	if _, err := b.dynamic.Resource(sandboxResource).Namespace(b.config.Namespace).Create(ctx, sandbox, metav1.CreateOptions{}); err != nil {
 		_ = b.Delete(context.Background(), session)
 		return nil, fmt.Errorf("create Sandbox: %w", err)
@@ -277,6 +300,10 @@ func (b *KubernetesBackend) waitReady(parent context.Context, name string, progr
 }
 
 func (b *KubernetesBackend) sandbox(name string, labels map[string]string) *unstructured.Unstructured {
+	return b.sandboxAt(name, labels, time.Now())
+}
+
+func (b *KubernetesBackend) sandboxAt(name string, labels map[string]string, startedAt time.Time) *unstructured.Unstructured {
 	owner := make([]any, 0, len(b.owner))
 	for _, ref := range b.owner {
 		owner = append(owner, map[string]any{
@@ -285,6 +312,52 @@ func (b *KubernetesBackend) sandbox(name string, labels map[string]string) *unst
 			"name":       ref.Name,
 			"uid":        string(ref.UID),
 		})
+	}
+	spec := map[string]any{
+		"operatingMode":  "Running",
+		"shutdownPolicy": "Delete",
+		"podTemplate": map[string]any{
+			"metadata": map[string]any{"labels": stringMap(labels)},
+			"spec": map[string]any{
+				"automountServiceAccountToken":  false,
+				"enableServiceLinks":            false,
+				"runtimeClassName":              b.config.RuntimeClass,
+				"terminationGracePeriodSeconds": int64(5),
+				"containers": []any{map[string]any{
+					"name":            "linux",
+					"image":           b.config.GuestImage,
+					"imagePullPolicy": "IfNotPresent",
+					"ports": []any{map[string]any{
+						"name":          "ssh",
+						"containerPort": int64(guestPort),
+						"protocol":      "TCP",
+					}},
+					"resources": map[string]any{
+						"requests": map[string]any{"cpu": "2", "memory": "2Gi"},
+						"limits":   map[string]any{"cpu": "4", "memory": "4Gi"},
+					},
+					"securityContext": map[string]any{
+						"runAsUser":  int64(0),
+						"runAsGroup": int64(0),
+					},
+					"volumeMounts": []any{map[string]any{
+						"name":      "session-key",
+						"mountPath": "/run/tempvm-credentials",
+						"readOnly":  true,
+					}},
+				}},
+				"volumes": []any{map[string]any{
+					"name": "session-key",
+					"secret": map[string]any{
+						"secretName":  name,
+						"defaultMode": int64(0400),
+					},
+				}},
+			},
+		},
+	}
+	if b.config.MaxSessionTTL > 0 {
+		spec["shutdownTime"] = startedAt.Add(b.config.MaxSessionTTL).UTC().Format(time.RFC3339)
 	}
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "agents.x-k8s.io/v1beta1",
@@ -295,50 +368,16 @@ func (b *KubernetesBackend) sandbox(name string, labels map[string]string) *unst
 			"labels":          stringMap(labels),
 			"ownerReferences": owner,
 		},
-		"spec": map[string]any{
-			"operatingMode":  "Running",
-			"shutdownPolicy": "Delete",
-			"podTemplate": map[string]any{
-				"metadata": map[string]any{"labels": stringMap(labels)},
-				"spec": map[string]any{
-					"automountServiceAccountToken":  false,
-					"enableServiceLinks":            false,
-					"runtimeClassName":              b.config.RuntimeClass,
-					"terminationGracePeriodSeconds": int64(5),
-					"containers": []any{map[string]any{
-						"name":            "linux",
-						"image":           b.config.GuestImage,
-						"imagePullPolicy": "IfNotPresent",
-						"ports": []any{map[string]any{
-							"name":          "ssh",
-							"containerPort": int64(guestPort),
-							"protocol":      "TCP",
-						}},
-						"resources": map[string]any{
-							"requests": map[string]any{"cpu": "2", "memory": "2Gi"},
-							"limits":   map[string]any{"cpu": "4", "memory": "4Gi"},
-						},
-						"securityContext": map[string]any{
-							"runAsUser":  int64(0),
-							"runAsGroup": int64(0),
-						},
-						"volumeMounts": []any{map[string]any{
-							"name":      "session-key",
-							"mountPath": "/run/tempvm-credentials",
-							"readOnly":  true,
-						}},
-					}},
-					"volumes": []any{map[string]any{
-						"name": "session-key",
-						"secret": map[string]any{
-							"secretName":  name,
-							"defaultMode": int64(0400),
-						},
-					}},
-				},
-			},
-		},
+		"spec": spec,
 	}}
+}
+
+func sessionLabels(name string, startedAt time.Time) map[string]string {
+	return map[string]string{
+		managedLabel:   managedValue,
+		sessionLabel:   name,
+		startedAtLabel: strconv.FormatInt(startedAt.Unix(), 10),
+	}
 }
 
 func randomName() (string, error) {
