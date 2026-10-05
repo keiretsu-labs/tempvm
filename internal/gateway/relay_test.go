@@ -19,7 +19,7 @@ func TestBridgeChannelSignalsGuestCompletion(t *testing.T) {
 	close(frontRequests)
 	close(guestRequests)
 
-	done := bridgeChannel(front, frontRequests, guest, guestRequests)
+	done := bridgeChannel(newChannelOutput(front), frontRequests, newChannelOutput(guest), guestRequests)
 	select {
 	case <-done:
 	case <-time.After(time.Second):

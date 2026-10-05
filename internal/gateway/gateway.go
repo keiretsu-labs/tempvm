@@ -143,8 +143,9 @@ func (g *Gateway) handleConnection(parent context.Context, raw net.Conn) {
 		g.logger.Warn("accept first SSH channel", "source_ip", sourceIP, "error", err)
 		return
 	}
-	defer frontChannel.Close()
-	progress := frontChannel.Stderr()
+	frontOutput := newChannelOutput(frontChannel)
+	defer frontOutput.Close()
+	progress := frontOutput.StderrWriter()
 
 	if !identity.allowed(g.config) {
 		g.logSessionEvent(
@@ -333,9 +334,10 @@ func (g *Gateway) handleConnection(parent context.Context, raw net.Conn) {
 		handleBootFailure(err, "Guest rejected SSH channel")
 		return
 	}
-	defer backChannel.Close()
+	backOutput := newChannelOutput(backChannel)
+	defer backOutput.Close()
 
-	channelDone := bridgeChannel(frontChannel, frontChannelRequests, backChannel, backChannelRequests)
+	channelDone := bridgeSessionChannel(frontOutput, frontChannelRequests, backOutput, backChannelRequests)
 	go bridgeGlobalRequests(frontRequests, back)
 	go bridgeGlobalRequests(backRequests, front)
 	go bridgeNewChannels(frontChannels, back)
@@ -365,8 +367,8 @@ func (g *Gateway) handleConnection(parent context.Context, raw net.Conn) {
 	if stopReason == "ttl" {
 		_, _ = io.WriteString(progress, "Session TTL expired; closing this microVM.\r\n")
 		cancel()
-		_ = frontChannel.Close()
-		_ = backChannel.Close()
+		_ = frontOutput.Close()
+		_ = backOutput.Close()
 		_ = front.Close()
 		_ = back.Close()
 		recordTTLExpired()
