@@ -1,10 +1,69 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/keiretsu-labs/tempvm/internal/gateway"
 )
 
-func landingHandler(w http.ResponseWriter, request *http.Request) {
+func healthHandler(sources ...gateway.StatusProvider) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, request *http.Request) {
+		landingHandler(w, request, sources...)
+	})
+	for _, path := range []string{"/healthz", "/readyz"} {
+		mux.HandleFunc(path, func(w http.ResponseWriter, _ *http.Request) {
+			status := currentStatus(sources...)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(struct {
+				Status         string `json:"status"`
+				ActiveSessions int    `json:"active_sessions"`
+				MaxSessions    int    `json:"max_sessions"`
+				MaxSessionTTL  string `json:"max_session_ttl"`
+			}{
+				Status:         "ok",
+				ActiveSessions: status.ActiveSessions,
+				MaxSessions:    status.MaxSessions,
+				MaxSessionTTL:  statusTTL(status),
+			})
+		})
+	}
+	return mux
+}
+
+func currentStatus(sources ...gateway.StatusProvider) gateway.Status {
+	if len(sources) == 0 || sources[0] == nil {
+		return gateway.Status{}
+	}
+	return sources[0].Status()
+}
+
+func statusTTL(status gateway.Status) string {
+	if status.MaxSessionTTL <= 0 {
+		return "disabled"
+	}
+	return status.MaxSessionTTL.String()
+}
+
+func statusMaxSessions(status gateway.Status) string {
+	if status.MaxSessions <= 0 {
+		return "unlimited"
+	}
+	return stringValue(status.MaxSessions)
+}
+
+func stringValue(value int) string {
+	if value < 0 {
+		return "unknown"
+	}
+	return strconv.Itoa(value)
+}
+
+func landingHandler(w http.ResponseWriter, request *http.Request, sources ...gateway.StatusProvider) {
 	if request.URL.Path != "/" {
 		http.NotFound(w, request)
 		return
@@ -22,7 +81,13 @@ func landingHandler(w http.ResponseWriter, request *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
 	if request.Method == http.MethodGet {
-		_, _ = w.Write([]byte(landingPage))
+		status := currentStatus(sources...)
+		page := strings.NewReplacer(
+			"__ACTIVE_SESSIONS__", stringValue(status.ActiveSessions),
+			"__MAX_SESSIONS__", statusMaxSessions(status),
+			"__MAX_SESSION_TTL__", statusTTL(status),
+		).Replace(landingPage)
+		_, _ = w.Write([]byte(page))
 	}
 }
 
@@ -146,10 +211,11 @@ const landingPage = `<!doctype html>
         <div><dt>Guest</dt><dd>Ubuntu 24.04 · x86_64</dd></div>
         <div><dt>Runtime</dt><dd>Kata · Cloud Hypervisor</dd></div>
         <div><dt>Node</dt><dd>Shiro · Ottawa</dd></div>
-        <div><dt>Lifetime</dt><dd>Your SSH session</dd></div>
+        <div><dt>Active sessions</dt><dd>__ACTIVE_SESSIONS__ / __MAX_SESSIONS__</dd></div>
+        <div><dt>Max TTL</dt><dd>__MAX_SESSION_TTL__</dd></div>
       </dl>
     </section>
-    <footer>Tailnet access only · ephemeral credentials · no fixed TTL</footer>
+    <footer>Tailnet access only · ephemeral credentials · bounded lifetime</footer>
   </main>
 </body>
 </html>
